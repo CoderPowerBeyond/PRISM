@@ -9,10 +9,9 @@ Long-range interactions are central to molecular properties but remain difficult
 
 ## Framework Overview
 
-<!-- TODO: Replace with your framework figure -->
-<!-- Example: ![PRISM Framework](./results/figures/framework.png) -->
 
-![Framework Placeholder](https://via.placeholder.com/1200x500?text=PRISM+Framework+Diagram+Placeholder)
+![PRISM Framework](architecture.png)
+
 
 
 
