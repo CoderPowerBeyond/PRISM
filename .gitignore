@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# Local datasets and generated artifacts
+data/
+checkpoints/
+results/
+metrics/
