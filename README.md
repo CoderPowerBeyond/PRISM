@@ -1,7 +1,4 @@
-# PRISM
-
-PRISM is a molecular machine learning project for benchmark datasets such as
-BBBP, ESOL, FreeSolv, HIV, MUV, QM7, QM9, SIDER, Tox21, and PDBBind-related tasks.
+# Curvature-conditioned propagation enables long-range learning in molecular property prediction
 
 ## Abstract
 
