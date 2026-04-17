@@ -22,3 +22,23 @@ Install dependencies from `requirements.txt`:
 pip install -r requirements.txt
 ```
 
+### 2) How to Run
+Classification example (BBBP):
+
+```bash
+python main_bbbp.py
+```
+
+Regression example (ESOL):
+
+```bash
+python main_esol.py
+```
+
+### 3) Hyperparameter Tuning
+
+Training hyperparameters are configured in:
+
+```text
+configs/gat_path.yaml
+```
