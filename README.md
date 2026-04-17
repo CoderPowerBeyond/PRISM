@@ -16,12 +16,9 @@ Long-range interactions are central to molecular properties but remain difficult
 
 ### 1) Environment
 
-Create a Python environment and install dependencies:
+Install dependencies from `requirements.txt`:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-# TODO: add your exact dependencies (requirements.txt or conda env)
-pip install -U pip
+pip install -r requirements.txt
 ```
 
