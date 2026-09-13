@@ -1,5 +1,7 @@
 import os
 
+import copy
+
 import time
 
 import argparse
@@ -449,49 +451,48 @@ def eval_epoch(model, loader, device, num_tasks, noise_level=0.0):
         return 0.0
 
 def main():
-
     parser = argparse.ArgumentParser()
-
-    parser.add_argument("--dataset", default="bace",
-
-                    choices=["bbbp", "bace", "tox21", "clintox", "hiv", "sider", "muv"])
-
+    parser.add_argument("--dataset", default="bace", choices=["bbbp", "bace", "tox21", "clintox", "hiv", "sider", "muv"])
     parser.add_argument("--epochs", type=int, default=400)
-
     parser.add_argument("--batch", type=int, default=64)
-
     parser.add_argument("--lr", type=float, default=5e-4)
-
     parser.add_argument("--hidden", type=int, default=128)
-
     parser.add_argument("--layers", type=int, default=5)
-
     parser.add_argument("--dropout", type=float, default=0.15)
-
     parser.add_argument("--lambda_reason", type=float, default=0.002)
-
-    parser.add_argument("--patience", type=int, default=50)
-
-    parser.add_argument("--seed", type=int, default=7)
-
-    parser.add_argument(
-
-        "--model",
-
-        choices=("geomo", "mace"),
-
-        default="geomo",
-
-        help="geomo=EnhancedOG_PGAT, mace=MACE baseline (requires pip install mace-torch)",
-
-    )
-
+    parser.add_argument("--patience", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=2046)
+    parser.add_argument("--model", choices=("geomo", "mace"), default="geomo",
+                        help="geomo=EnhancedOG_PGAT, mace=MACE baseline (requires pip install mace-torch)")
+    # 新增保存目录参数
+    parser.add_argument("--save_dir", default="./checkpoints", help="Directory to save model checkpoints")
+    parser.add_argument("--save_every", type=int, default=0,
+                        help="If > 0, also save a periodic checkpoint every N epochs")
+    parser.add_argument("--ckpt", default="", help="Checkpoint path. Used by --eval_only, or to resume weights.")
+    parser.add_argument("--eval_only", action="store_true",
+                        help="Skip training and evaluate checkpoint on val/test")
+    parser.add_argument("--n_runs", type=int, default=5,
+                        help="Repeat training with seeds seed, seed+1, ... and report mean±std")
     args = parse_args_with_gat_config(parser)
 
-    set_seed(args.seed)
+    os.makedirs(args.save_dir, exist_ok=True)
+
+    ckpt_path = args.ckpt or os.path.join(args.save_dir, f"{args.dataset}_best_model.pth")
+    ckpt = None
+    if args.eval_only or args.ckpt:
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        saved_args = ckpt.get("args", {})
+        if isinstance(saved_args, argparse.Namespace):
+            saved_args = vars(saved_args)
+        for key in ("dataset", "hidden", "layers", "dropout", "model", "seed"):
+            if key in saved_args:
+                setattr(args, key, saved_args[key])
+        print(f"Loaded checkpoint metadata from {ckpt_path} "
+              f"(epoch={ckpt.get('epoch')}, best_val_auc={ckpt.get('best_val_auc')})")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     print(f"Using device: {device}")
 
     dataset = MoleculeNet(root=f"data/{args.dataset}", name=args.dataset)
@@ -508,149 +509,178 @@ def main():
 
     num_tasks = max(num_tasks, 1)
 
-    tr_i, va_i, te_i = scaffold_split(dataset)
+    def make_split(seed):
+        tr_i, va_i, te_i = scaffold_split(dataset, seed=seed)
+        has_geo = set(getattr(dataset, "_geo_pos", {}).keys())
+        if len(has_geo) < len(dataset):
+            tr_i = [i for i in tr_i if i in has_geo]
+            va_i = [i for i in va_i if i in has_geo]
+            te_i = [i for i in te_i if i in has_geo]
+            if not tr_i or not va_i or not te_i:
+                raise RuntimeError("A split is empty after filtering missing 3D geometries; try a different --seed.")
+        return tr_i, va_i, te_i
 
-    print(f"Split: Train={len(tr_i)}, Val={len(va_i)}, Test={len(te_i)} | Tasks={num_tasks}")
-
-    has_geo = set(getattr(dataset, "_geo_pos", {}).keys())
-
-    if len(has_geo) < len(dataset):
-
-        tr_i = [i for i in tr_i if i in has_geo]
-
-        va_i = [i for i in va_i if i in has_geo]
-
-        te_i = [i for i in te_i if i in has_geo]
-
-        if not tr_i or not va_i or not te_i:
-
-            raise RuntimeError("A split is empty after filtering missing 3D geometries; try a different --seed.")
-
-        print(f"Filtered splits (valid 3D only) → Train={len(tr_i)}, Val={len(va_i)}, Test={len(te_i)}")
-
-    trL = DataLoader([dataset_sample_with_geom(dataset, i) for i in tr_i], batch_size=args.batch, shuffle=True)
-
-    vaL = DataLoader([dataset_sample_with_geom(dataset, i) for i in va_i], batch_size=args.batch)
-
-    teL = DataLoader([dataset_sample_with_geom(dataset, i) for i in te_i], batch_size=args.batch)
-
-    if args.model == "mace":
-
-        if build_mace_for_geomo is None:
-
-            raise RuntimeError("MACE requires: pip install mace-torch")
-
-        model = build_mace_for_geomo(
-
+    def build_model():
+        if args.model == "mace":
+            if build_mace_for_geomo is None:
+                raise RuntimeError("MACE requires: pip install mace-torch")
+            return build_mace_for_geomo(
+                input_dim=num_feats,
+                hidden=args.hidden,
+                n_layers=args.layers,
+                dropout=args.dropout,
+                num_tasks=num_tasks,
+            ).to(device)
+        return EnhancedOG_PGAT(
             input_dim=num_feats,
-
             hidden=args.hidden,
-
             n_layers=args.layers,
-
             dropout=args.dropout,
-
             num_tasks=num_tasks,
-
-        ).to(device)
-
-    else:
-
-        model = EnhancedOG_PGAT(
-
-            input_dim=num_feats,
-
-            hidden=args.hidden,
-
-            n_layers=args.layers,
-
-            dropout=args.dropout,
-
-            num_tasks=num_tasks,
-
             edge_dim=num_edge_feats,
-
             disable_crf=False,
-
             mean_pool_only=False,
-
         ).to(device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    def make_loaders(tr_i, va_i, te_i):
+        trL = DataLoader([dataset_sample_with_geom(dataset, i) for i in tr_i], batch_size=args.batch, shuffle=True)
+        vaL = DataLoader([dataset_sample_with_geom(dataset, i) for i in va_i], batch_size=args.batch)
+        teL = DataLoader([dataset_sample_with_geom(dataset, i) for i in te_i], batch_size=args.batch)
+        return trL, vaL, teL
 
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs, eta_min=args.lr/20)
+    if args.eval_only:
+        set_seed(args.seed)
+        tr_i, va_i, te_i = make_split(args.seed)
+        print(f"Split: Train={len(tr_i)}, Val={len(va_i)}, Test={len(te_i)} | Tasks={num_tasks}")
+        _, vaL, teL = make_loaders(tr_i, va_i, te_i)
+        model = build_model()
+        if ckpt is not None:
+            state = ckpt.get("model_state_dict") or ckpt.get("model") or ckpt
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            print(f"Loaded weights from {ckpt_path}")
+            if missing:
+                print(f"  missing keys: {len(missing)}")
+            if unexpected:
+                print(f"  unexpected keys: {len(unexpected)}")
+        val_auc = eval_epoch(model, vaL, device, num_tasks, 0.0)
+        test_auc = eval_epoch(model, teL, device, num_tasks, 0.0)
+        print(f"Eval-only [{args.dataset}] Val AUC={val_auc:.4f} | Test AUC={test_auc:.4f}")
+        if ckpt is not None:
+            print(f"Checkpoint recorded best Val AUC={ckpt.get('best_val_auc')} "
+                  f"| Test AUC={ckpt.get('test_auc')}")
+        return
 
     all_y = torch.cat([d.y.view(1, -1) for d in dataset], 0)
-
     all_y[all_y == -1] = float("nan")
-
     pos_w = []
-
     for i in range(all_y.shape[1]):
-
         yi = all_y[:, i]
-
         y0, y1 = torch.sum(yi == 0), torch.sum(yi == 1)
-
         pos_w.append((y0 / (y1 + 1e-6)).item() if y1 > 0 else 1.0)
-
     pos_weight = torch.tensor(pos_w, device=device)
-
     print("→ pos_weight:", pos_weight.cpu().numpy())
 
-    best_auc, best_state, bad_epochs = 0.0, None, 0
+    n_runs = max(1, int(args.n_runs))
+    run_val_aucs, run_test_aucs = [], []
 
-    loss_history, val_history = [], []
+    for run in range(n_runs):
+        run_seed = args.seed + run
+        set_seed(run_seed)
+        print(f"\n===== Run {run + 1}/{n_runs} | seed={run_seed} =====")
 
-    for epoch in range(1, args.epochs + 1):
+        tr_i, va_i, te_i = make_split(run_seed)
+        print(f"Split: Train={len(tr_i)}, Val={len(va_i)}, Test={len(te_i)} | Tasks={num_tasks}")
+        trL, vaL, teL = make_loaders(tr_i, va_i, te_i)
+        model = build_model()
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs, eta_min=args.lr / 20)
 
-        start_time = time.time()
+        best_auc, best_state, bad_epochs = 0.0, None, 0
+        loss_history, val_history = [], []
 
-        tr_loss = train_epoch(model, trL, opt, device, args.lambda_reason, pos_weight, 0.0)
+        def save_checkpoint(path, epoch, extra=None):
+            payload = {
+                "epoch": epoch,
+                "model_state_dict": copy.deepcopy(model.state_dict()),
+                "optimizer_state_dict": opt.state_dict(),
+                "scheduler_state_dict": sched.state_dict(),
+                "best_val_auc": best_auc,
+                "seed": run_seed,
+                "args": vars(args),
+            }
+            if extra:
+                payload.update(extra)
+            torch.save(payload, path)
 
-        val_auc = eval_epoch(model, vaL, device, num_tasks, 0.0)
+        for epoch in range(1, args.epochs + 1):
+            start_time = time.time()
+            tr_loss = train_epoch(model, trL, opt, device, args.lambda_reason, pos_weight, 0.0)
+            val_auc = eval_epoch(model, vaL, device, num_tasks, 0.0)
+            sched.step()
+            end_time = time.time()
+            loss_history.append(tr_loss)
+            val_history.append(val_auc)
+            print(f"[{epoch:03d}] Loss={tr_loss:.4f} | Val AUC={val_auc:.4f} | Time Cost={(end_time-start_time):.4f}s")
 
-        sched.step()
+            if val_auc > best_auc:
+                best_auc = val_auc
+                best_state = copy.deepcopy(model.state_dict())
+                bad_epochs = 0
+                checkpoint_path = os.path.join(
+                    args.save_dir, f"{args.dataset}_seed{run_seed}_best_model.pth"
+                )
+                save_checkpoint(checkpoint_path, epoch)
+                print(f"Best model saved to {checkpoint_path} (Val AUC={best_auc:.4f})")
+            else:
+                bad_epochs += 1
 
-        end_time = time.time()
+            if args.save_every > 0 and epoch % args.save_every == 0:
+                periodic_path = os.path.join(
+                    args.save_dir, f"{args.dataset}_seed{run_seed}_epoch{epoch:03d}.pth"
+                )
+                save_checkpoint(periodic_path, epoch)
+                print(f"Periodic checkpoint saved to {periodic_path}")
 
-        loss_history.append(tr_loss)
+            if bad_epochs >= args.patience:
+                print("Early stopping: no improvement.")
+                break
 
-        val_history.append(val_auc)
+        last_path = os.path.join(args.save_dir, f"{args.dataset}_seed{run_seed}_last_model.pth")
+        save_checkpoint(last_path, epoch)
+        print(f"Last-epoch checkpoint saved to {last_path}")
 
-        print(f"[{epoch:03d}] Loss={tr_loss:.4f} | Val AUC={val_auc:.4f} | Time Cost={(end_time-start_time):.4f}s")
+        if best_state:
+            model.load_state_dict(best_state)
 
-        if val_auc > best_auc:
+        test_auc = eval_epoch(model, teL, device, num_tasks, 0.0)
+        print(f"Run {run + 1} Test AUC = {test_auc:.4f} (best Val = {best_auc:.4f})")
 
-            best_auc, best_state, bad_epochs = val_auc, model.state_dict(), 0
+        best_path = os.path.join(args.save_dir, f"{args.dataset}_seed{run_seed}_best_model.pth")
+        if os.path.isfile(best_path):
+            run_ckpt = torch.load(best_path, map_location="cpu")
+            run_ckpt["test_auc"] = test_auc
+            torch.save(run_ckpt, best_path)
 
-        else:
+        run_val_aucs.append(best_auc)
+        run_test_aucs.append(test_auc)
 
-            bad_epochs += 1
+        loss_conv = find_convergence_epoch(loss_history)
+        val_conv = find_convergence_epoch(val_history)
+        print(
+            f"Convergence: Loss @ epoch {loss_conv if loss_conv else 'N/A'}, "
+            f"Val AUC @ epoch {val_conv if val_conv else 'N/A'} "
+            f"(total {len(loss_history)} epochs)"
+        )
 
-        if bad_epochs >= args.patience:
-
-            print("Early stopping: no improvement.")
-
-            break
-
-    if best_state:
-
-        model.load_state_dict(best_state)
-
-    test_auc = eval_epoch(model, teL, device, num_tasks, 0.0)
-
-    print(f"Final Test AUC = {test_auc:.4f} (best Val = {best_auc:.4f})")
-
-    loss_conv = find_convergence_epoch(loss_history)
-
-    val_conv = find_convergence_epoch(val_history)
-
-    print(f"Convergence: Loss @ epoch {loss_conv if loss_conv else 'N/A'}, "
-
-          f"Val AUC @ epoch {val_conv if val_conv else 'N/A'} "
-
-          f"(total {len(loss_history)} epochs)")
+    val_arr = np.array(run_val_aucs, dtype=float)
+    test_arr = np.array(run_test_aucs, dtype=float)
+    val_std = float(val_arr.std(ddof=1)) if len(val_arr) > 1 else 0.0
+    test_std = float(test_arr.std(ddof=1)) if len(test_arr) > 1 else 0.0
+    print("\n" + "=" * 50)
+    print(f"{args.dataset.upper()} over {n_runs} runs (seeds {args.seed}..{args.seed + n_runs - 1})")
+    print(f"Val AUC:  {val_arr.mean():.4f} ± {val_std:.4f}  values={run_val_aucs}")
+    print(f"Test AUC: {test_arr.mean():.4f} ± {test_std:.4f}  values={run_test_aucs}")
+    print("=" * 50)
 
 if __name__ == "__main__":
 
