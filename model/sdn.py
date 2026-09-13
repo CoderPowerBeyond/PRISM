@@ -29,11 +29,6 @@ from collections import defaultdict
 
 
                                                               
-
-                                                                 
-
-                                                              
-
 def laplace_beltrami_penalty(curv, edge_index, strength=0.2):
 
     if curv is None or edge_index is None:
@@ -206,6 +201,14 @@ class TopologicalDiffusion(nn.Module):
 
         self.ablation_attn_logits = nn.Parameter(torch.zeros(max_layers))
 
+        self.jk_proj = nn.Sequential(
+
+            nn.Linear(hidden_dim * max_layers, hidden_dim),
+
+            nn.GELU(),
+
+        )
+
                                                                  
 
         self.depth_from_node = nn.Linear(hidden_dim, 1)
@@ -250,6 +253,24 @@ class TopologicalDiffusion(nn.Module):
         layer_indices = torch.arange(L, device=kappa.device, dtype=torch.float32)
 
 
+
+        if ablation_mode == "jk":
+
+            h_topo_adaptive = self.jk_proj(
+
+                layer_outputs.reshape(num_nodes, L * layer_outputs.size(-1))
+
+            )
+
+            self.last_halting_probs = None
+
+            self.last_expected_depths = None
+
+            return h_topo_adaptive, torch.full(
+
+                (), float("nan"), device=x.device, dtype=layer_outputs.dtype
+
+            )
 
         if ablation_mode == "uniform":
 
@@ -324,6 +345,10 @@ class TopologicalDiffusion(nn.Module):
         expected_depths = (halting_probs * layer_indices.unsqueeze(0)).sum(dim=1)
 
         avg_rf_depth = expected_depths.mean()
+
+        self.last_halting_probs = halting_probs.detach()
+
+        self.last_expected_depths = expected_depths.detach()
 
         return h_topo_adaptive, avg_rf_depth
 
