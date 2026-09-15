@@ -7,7 +7,7 @@ Graph neural networks for molecular property prediction usually fix one propagat
 ## Framework Overview
 
 
-![PRISM Framework](PRISM_Chemical_Architecture.pdf)
+![PRISM Framework](Architecture.png)
 
 
 
