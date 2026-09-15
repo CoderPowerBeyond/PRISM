@@ -7,7 +7,7 @@ Long-range interactions are central to molecular properties but remain difficult
 ## Framework Overview
 
 
-![PRISM Framework](architecture.png)
+![PRISM Framework](PRISM_Chemical_Architecture.pdf)
 
 
 
